@@ -77,7 +77,7 @@ This section records scope boundaries that are non-negotiable for the current wo
 Changing any boundary below requires a MAJOR version amendment to this constitution.
 
 | Constraint | Value | Rationale |
-|---|---|---|
+| --- | --- | --- |
 | Target region | `canadacentral` | Compliance data-residency requirement |
 | High availability | **Not required** | Workload is a demo/sample; SLA not mandated |
 | Disaster recovery | **Not required** | No RTO/RPO objectives defined |
