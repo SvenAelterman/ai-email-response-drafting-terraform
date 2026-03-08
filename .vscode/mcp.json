@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "terraform": {
+      "type": "stdio",
+      "command": "C:\\Tools\\mcp-servers\\terraform\\terraform-mcp-server.exe"
+    }
+  }
+}
