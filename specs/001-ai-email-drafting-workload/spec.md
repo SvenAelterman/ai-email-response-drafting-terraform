@@ -3,12 +3,29 @@
 **Feature Branch**: `001-ai-email-drafting-workload`  
 **Created**: 2026-03-08  
 **Status**: Draft  
-**Last Updated**: 2026-03-08 — Updated to use a single user-assigned managed identity for all services.  
+**Last Updated**: 2026-03-08 — Updated to use a single user-assigned managed identity for all services; Key Vault explicitly provisioned with private endpoint added (Q5 clarification); log retention revised to 30-day minimum; second clarification session: Key Vault associated-only, RG created by Terraform, Storage ZRS, NSGs on subnets, minimum RBAC roles specified.  
 **Input**: User description: "Create specification for an AI email response drafting app that has a Power Platform component. The Power Platform component is out of scope. The app needs Azure AI Foundry, Azure AI Search, Azure Storage Account, private endpoints, managed identity, AVM modules, Terraform-only, Canada Central region."
+
+## Clarifications
+
+### Session 2026-03-08
+
+- Q: What SKU tier should Azure AI Search use? → A: Standard S1 (supports private endpoints, vector search, semantic ranking; upgradeable if knowledge base grows)
+- Q: What compliance standard drives the data-retention period? → A: No named standard applies; 30-day minimum is sufficient
+- Q: How should the AI Search indexer be triggered? → A: Scheduled, running once per hour (lower cost; document updates are infrequent)
+- Q: What network isolation mode should Azure AI Foundry use? → A: Allow only approved outbound (managed VNet enabled; all outbound to AI Search and Storage via private managed endpoints; no internet egress)
+- Q: Does Key Vault need to be explicitly provisioned? → A: Yes — explicit Key Vault with private endpoint, provisioned by Terraform, associated with Foundry hub, public access disabled
+- Q: Is Azure Key Vault used for customer-managed key (CMK) encryption or associated-only? → A: Associated-only — provisioned and linked to Foundry as a dependency; platform-managed encryption; no CMK-specific RBAC or soft-delete/purge-protection configuration required
+- Q: Is the production resource group pre-existing or created by Terraform? → A: Created by Terraform — provisioned as part of apply, named with six-segment convention, destroyed with terraform destroy
+- Q: What replication tier should the Storage Account use? → A: ZRS (Zone-Redundant Storage) — three synchronous copies across availability zones in canadacentral; no cross-region replication
+- Q: Should NSGs be attached to the private endpoint subnets? → A: Yes — one NSG per subnet; inbound permitted only from approved source CIDR ranges in terraform.tfvars; all other inbound denied
+- Q: What minimum RBAC roles must the UAMI hold? → A: Search Index Data Contributor + Search Service Contributor on AI Search; Storage Blob Data Contributor on Storage Account
+
+---
 
 ## Scope Boundary
 
-**In scope**: Terraform infrastructure code for the Azure AI workload — Azure AI Foundry, Azure AI Search, Azure Storage Account, Virtual Network subnets, private endpoints, DNS integration, managed identity role assignments, diagnostic logging, and resource naming.
+**In scope**: Terraform infrastructure code for the Azure AI workload — Azure AI Foundry, Azure AI Search, Azure Storage Account, Azure Key Vault, Virtual Network subnets, Network Security Groups, private endpoints, DNS integration, managed identity role assignments, diagnostic logging, and resource naming.
 
 **Out of scope**: Power Platform components (connectors, flows, apps, Copilot Studio agents), application-layer code, CI/CD pipeline definitions, and any non-Azure infrastructure.
 
@@ -32,7 +49,7 @@ or demonstrated without the core services being deployed.
 
 **Acceptance Scenarios**:
 
-1. **Given** a valid `terraform.tfvars` with all required segment values, **When** `terraform apply` runs, **Then** an Azure AI Foundry hub and project, an Azure AI Search instance, and an Azure Storage Account with a blob container are created in `canadacentral` inside a single resource group.
+1. **Given** a valid `terraform.tfvars` with all required segment values, **When** `terraform apply` runs, **Then** an Azure AI Foundry hub and project, an Azure AI Search instance, an Azure Storage Account with a blob container, and an Azure Key Vault are created in `canadacentral` inside a single resource group.
 2. **Given** the deployed resources, **When** their names are inspected, **Then** every name follows the pattern `<workload>-<env>-<type-abbrev>-<region>-<instance>-<org>` (kebab-case, with resource-type character limits respected; globally unique resources include random characters).
 3. **Given** the workload's `terraform.tfvars` is the only configuration file, **When** any configurable value (region, instance number, org identifier, etc.) is changed there, **Then** `terraform plan` reflects the change without any edits to `main.tf`.
 
@@ -123,7 +140,7 @@ errors and a plan that matches the expected resource count.
 
 1. **Given** the repository is in a clean state, **When** `terraform fmt -check` is run, **Then** it exits with code 0 and reports no formatting issues.
 2. **Given** a configured backend and `terraform.tfvars`, **When** `terraform validate` is run after `terraform init`, **Then** it exits with code 0 and reports "Success! The configuration is valid."
-3. **Given** a valid plan, **When** the plan output is reviewed, **Then** no resource outside the expected set (resource group, AI Foundry hub, AI Foundry project, AI Search, Storage Account, subnets, private endpoints, DNS records, role assignments, diagnostic settings) appears in the diff.
+3. **Given** a valid plan, **When** the plan output is reviewed, **Then** no resource outside the expected set (resource group, AI Foundry hub, AI Foundry project, AI Search, Storage Account, Key Vault, subnets, private endpoints, DNS records, role assignments, diagnostic settings) appears in the diff.
 
 ---
 
@@ -134,6 +151,7 @@ errors and a plan that matches the expected resource count.
 - What happens when the Log Analytics Workspace resource ID in `terraform.tfvars` is invalid or the workspace does not exist? → Terraform `plan` or `apply` MUST fail with a clear resource-not-found error rather than silently skipping diagnostic settings.
 - What happens when a resource name exceeds the maximum length for its type due to long segment values? → The naming logic MUST truncate or abbreviate predictably and be documented in a comment in `main.tf`; the generated name MUST remain unique and within limits.
 - What happens when an AVM does not support a required configuration option (e.g., zone redundancy for a particular SKU)? → The module variable for availability zones MUST be set to an explicit value between 1 and 3 (not -1), and this decision MUST be documented in a comment.
+- What happens when the AI Search indexer fails to run on its hourly schedule (e.g., the Storage Account is temporarily unreachable)? → The indexer MUST be configured to retry; stale index data is acceptable for up to 1 hour given the hourly schedule, and indexer run history is captured in diagnostic logs.
 
 ---
 
@@ -144,10 +162,12 @@ errors and a plan that matches the expected resource count.
 #### Infrastructure provisioning
 
 - **FR-001**: The infrastructure MUST be defined exclusively in Terraform (`.tf` files) using only Azure Verified Modules (AVM) sourced from the Terraform public registry. No ARM, Bicep, or custom provisioning scripts are permitted.
-- **FR-002**: Terraform MUST provision an Azure AI Foundry hub and an Azure AI Foundry project within a single production resource group in the `canadacentral` region.
-- **FR-003**: Terraform MUST provision an Azure AI Search instance in the same resource group configured for vector-search capabilities.
-- **FR-004**: Terraform MUST provision an Azure Storage Account with a blob container in the same resource group; this container serves as the knowledge-base data source for AI Foundry.
-- **FR-005**: Terraform MUST provision the required subnets inside the existing virtual network (resource ID obtained from `terraform.tfvars`) for private endpoint attachment.
+- **FR-002**: Terraform MUST provision a single production resource group in the `canadacentral` region, and within it an Azure AI Foundry hub and an Azure AI Foundry project. The resource group name MUST follow the six-segment naming convention; its name MUST be derived from `terraform.tfvars` segment values with no hard-coded values.
+- **FR-002a**: The Azure AI Foundry hub MUST be configured with network isolation mode set to **Allow only approved outbound**. This enables the Foundry-managed virtual network; all outbound traffic from Foundry to AI Search and Storage MUST traverse private managed endpoints. Internet egress from the managed network MUST NOT be permitted.
+- **FR-003**: Terraform MUST provision an Azure AI Search instance at the **Standard S1** SKU tier in the same resource group, configured for vector-search and semantic-ranking capabilities. The S1 tier is required to support private endpoints, vector indexing capacity, and semantic ranking.
+- **FR-003a**: Terraform MUST define an AI Search indexer targeting the Storage Account blob container with a **recurring schedule of once per hour**. The indexer MUST use change-detection to process only new or modified blobs.
+- **FR-004**: Terraform MUST provision an Azure Storage Account with **ZRS (Zone-Redundant Storage)** replication and a blob container in the same resource group; this container serves as the knowledge-base data source for AI Foundry.
+- **FR-005**: Terraform MUST provision the required subnets inside the existing virtual network (resource ID obtained from `terraform.tfvars`) for private endpoint attachment. Each subnet MUST have a dedicated Network Security Group (NSG) attached that permits inbound traffic only from approved source CIDR ranges supplied via `terraform.tfvars`; all other inbound traffic MUST be denied by default.
 - **FR-006**: Terraform MUST configure an OpenAI large language model (LLM) deployment on the Azure AI Foundry hub.
 
 #### Naming and configuration
@@ -163,14 +183,20 @@ errors and a plan that matches the expected resource count.
 #### Security and networking
 
 - **FR-014**: Azure AI Foundry, Azure AI Search, and the Azure Storage Account MUST each have a private endpoint configured. Public network access MUST be disabled on all three services.
+- **FR-014a**: Terraform MUST provision an Azure Key Vault, associate it with the Azure AI Foundry hub as a dependency, disable public network access, and configure a private endpoint in the customer VNet. The Key Vault MUST follow the same six-segment naming convention as all other resources.
 - **FR-015**: Private endpoint DNS registration MUST use the organization's existing Azure private DNS zones. The resource group containing those zones MUST be obtained from `terraform.tfvars`. No new private DNS zones are to be created.
 - **FR-016**: Terraform MUST provision exactly one user-assigned managed identity and assign it to Azure AI Foundry, Azure AI Search, and the Azure Storage Account. No system-assigned identities are to be used. Connection strings, API keys, and shared access signatures MUST NOT be used for any service-to-service communication.
-- **FR-017**: Terraform MUST create all Azure RBAC role assignments on the single user-assigned managed identity that are necessary for AI Foundry to access AI Search and Storage, and for AI Search to read and index blobs from the Storage Account.
+- **FR-017**: Terraform MUST create the following Azure RBAC role assignments on the single user-assigned managed identity:
+  - `Search Index Data Contributor` on the Azure AI Search instance (enables AI Foundry to read and write index documents)
+  - `Search Service Contributor` on the Azure AI Search instance (enables management-plane operations required by Foundry)
+  - `Storage Blob Data Contributor` on the Azure Storage Account (enables AI Search to read and index blobs, and AI Foundry to read knowledge-base content)
+  
+  No additional roles beyond this minimum set are to be assigned unless a specific AVM module requirement mandates it, in which case the deviation MUST be documented in a comment.
 
 #### Observability
 
 - **FR-018**: Diagnostic settings MUST be configured for Azure AI Foundry, Azure AI Search, and the Azure Storage Account, forwarding all available log and metric categories to an existing, centralized Log Analytics Workspace. The workspace resource ID MUST be obtained from `terraform.tfvars`.
-- **FR-019**: Data and audit logs MUST be retained for a minimum of 90 days in the Log Analytics Workspace (or longer if required by applicable compliance obligations).
+- **FR-019**: Data and audit logs MUST be retained for a minimum of **30 days** in the Log Analytics Workspace. No additional compliance-driven archival period applies to this workload.
 
 #### Deployment workflow
 
@@ -178,15 +204,17 @@ errors and a plan that matches the expected resource count.
 
 ### Key Entities
 
-- **Azure AI Foundry Hub**: The central AI platform resource. Hosts the OpenAI LLM deployment, connects to AI Search as the vector-search back-end, and uses the Storage Account as the knowledge-base data source.
+- **Resource Group**: The single container for all workload resources, provisioned by Terraform in `canadacentral`. Named following the six-segment convention. Destroyed together with all workload resources when `terraform destroy` is run.
+- **Azure AI Foundry Hub**: The central AI platform resource. Configured with **Allow only approved outbound** network isolation mode, which enables the Foundry-managed VNet and routes all outbound calls to AI Search and Storage through private managed endpoints. Hosts the OpenAI LLM deployment and connects to AI Search as the vector-search back-end and the Storage Account as the knowledge-base data source.
 - **Azure AI Foundry Project**: A logical workspace within the Foundry Hub where the email-drafting knowledge base and model deployments are organized.
-- **Azure AI Search Instance**: Provides vector-search indexing and retrieval. Indexes blobs from the Storage Account and is queried by AI Foundry at inference time.
-- **Azure Storage Account / Blob Container**: Stores the source documents used to build the AI knowledge base. AI Search indexes blobs from a dedicated container.
+- **Azure AI Search Instance**: Provides vector-search indexing and retrieval at the Standard S1 SKU tier. Indexes blobs from the Storage Account via a scheduled indexer (runs once per hour, change-detection enabled) and is queried by AI Foundry at inference time. S1 enables private endpoints, vector indexing, and semantic ranking.
+- **Azure Storage Account / Blob Container**: Stores the source documents used to build the AI knowledge base. Configured with **ZRS** replication (three synchronous copies across availability zones in `canadacentral`; no cross-region replication). AI Search indexes blobs from a dedicated container.
 - **Private Endpoints**: Network interface resources that bind each of the three services to a subnet on the existing virtual network. DNS A records are registered in the existing private DNS zones.
-- **User-Assigned Managed Identity**: A single user-assigned managed identity resource provisioned by Terraform and assigned to all three services (AI Foundry, AI Search, Storage Account). All RBAC role assignments for service-to-service access are made against this one identity, enabling centralized access governance and lifecycle management.
-- **Subnets**: Subdivisions of the existing virtual network created by Terraform to host the private endpoints. CIDR ranges are specified in `terraform.tfvars`.
+- **User-Assigned Managed Identity**: A single user-assigned managed identity resource provisioned by Terraform and assigned to all three services (AI Foundry, AI Search, Storage Account). Holds the following minimum RBAC roles: `Search Index Data Contributor` and `Search Service Contributor` on AI Search; `Storage Blob Data Contributor` on the Storage Account. All service-to-service access is governed through this one identity.
+- **Subnets**: Subdivisions of the existing virtual network created by Terraform to host the private endpoints. CIDR ranges are specified in `terraform.tfvars`. Each subnet has a dedicated NSG attached; NSG rules restrict inbound access to approved source CIDR ranges defined in `terraform.tfvars`.
 - **Log Analytics Workspace** *(pre-existing)*: Centralized observability target. Referenced by resource ID from `terraform.tfvars`; not created by this Terraform configuration.
 - **Private DNS Zones** *(pre-existing)*: Authoritative DNS zones for `privatelink.*` domains. Referenced by resource group from `terraform.tfvars`; not created by this Terraform configuration.
+- **Azure Key Vault**: Provisioned by Terraform and associated with the Azure AI Foundry hub as a dependency. Platform-managed encryption is used; no customer-managed key (CMK) configuration, soft-delete enforcement, or purge-protection setting beyond the AVM defaults is required. Public network access disabled; accessible only via private endpoint in the customer VNet. Named following the six-segment convention.
 - **Virtual Network** *(pre-existing)*: The hub or spoke VNet into which subnets are injected. Referenced by resource ID from `terraform.tfvars`; not created by this Terraform configuration.
 
 ---
@@ -203,19 +231,21 @@ errors and a plan that matches the expected resource count.
 - **SC-006**: DNS queries for the private endpoint FQDNs, issued from a host inside the virtual network, resolve to private IP addresses.
 - **SC-007**: `terraform show` and the state file contain no storage account keys, AI Search admin keys, or service connection strings in plaintext.
 - **SC-008**: Diagnostic log entries from AI Foundry, AI Search, and the Storage Account are visible in the centralized Log Analytics Workspace within 15 minutes of activity.
-- **SC-009**: Exactly one user-assigned managed identity is deployed; it is assigned to all three services; and all required RBAC role assignments for service-to-service access are present and verifiable without any additional manual configuration.
+- **SC-009**: Exactly one user-assigned managed identity is deployed; it is assigned to all three services; and the following RBAC role assignments are present and verifiable without any additional manual configuration: `Search Index Data Contributor` and `Search Service Contributor` on AI Search, and `Storage Blob Data Contributor` on the Storage Account.
 - **SC-010**: `terraform fmt -check` exits with code 0, confirming all `.tf` files are consistently formatted.
 
 ---
 
 ## Assumptions
 
-- The organization's existing Azure private DNS zones for `privatelink.search.windows.net`, `privatelink.blob.core.windows.net`, `privatelink.cognitiveservices.azure.com`, and `privatelink.openai.azure.com` (and any other relevant privatelink zones for AI Foundry) already exist and are linked to the virtual network.
+- The organization's existing Azure private DNS zones for `privatelink.search.windows.net`, `privatelink.blob.core.windows.net`, `privatelink.cognitiveservices.azure.com`, `privatelink.openai.azure.com`, and `privatelink.vaultcore.azure.net` (and any other relevant privatelink zones for AI Foundry) already exist and are linked to the virtual network.
 - The existing virtual network has sufficient available IP address space for the subnets required by the private endpoints.
+- The operator will supply at least one approved source CIDR range in `terraform.tfvars` for NSG inbound rules; if no source CIDR is provided, Terraform MUST fail with a validation error.
 - An existing Log Analytics Workspace is available and its resource ID can be provided in `terraform.tfvars`.
 - The Terraform state backend is already configured (e.g., Azure Storage-based remote backend). Backend configuration is outside the scope of this specification.
 - The OpenAI LLM model selected for deployment (e.g., `gpt-4o`) is available in the `canadacentral` region and quota has already been approved.
 - Azure Verified Modules for all required resource types (AI Foundry, AI Search, Storage Account, subnets, private endpoints, role assignments) exist in the Terraform registry. If a module is absent for a resource, feature work is blocked pending a constitution amendment.
-- A single production resource group is sufficient; no geo-replication, zone-redundant storage replication across regions, or multi-region active-active topology is needed.
-- Compliance data-retention of 90 days is the minimum; the organization may require a longer period, which would be specified at implementation time in `terraform.tfvars`.
+- A single production resource group is sufficient; no geo-replication, ZRS within `canadacentral` is used for the Storage Account (no cross-region replication), or multi-region active-active topology is needed. The resource group is created and managed entirely by this Terraform configuration.
+- Compliance data-retention of 30 days is the minimum and is sufficient for this workload; no additional compliance-driven archival period applies.
 - A single user-assigned managed identity is used for all three services. If an AVM module for a specific service does not support user-assigned managed identities, feature work is blocked pending a constitution amendment.
+- The AI Foundry managed VNet (enabled by the "Allow only approved outbound" isolation mode) provisions its own private managed endpoints to AI Search and Storage in addition to the customer-VNet private endpoints. Both sets of endpoints are required and are not duplicates — the customer-VNet endpoints control inbound access to the services; the managed-VNet endpoints control outbound access from Foundry.
