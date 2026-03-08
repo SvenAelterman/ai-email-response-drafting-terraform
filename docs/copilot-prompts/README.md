@@ -36,3 +36,29 @@ The Azure resource naming convention must include the following six segments, in
 ---
 
 /speckit.specify Update the specification to use a single user-assigned managed identity for all services.
+
+## Clarify
+
+/speckit.clarify
+
+## Plan
+
+/speckit.plan Create a detailed plan for the spec. Build with the latest version of Terraform and the latest available version of each Azure Verified Module. Use the Terraform MCP server ("io.github.hashicorp/terraform-mcp-server") to find out what the latest version of each module is. Install and configure this MCP server as needed. Do NOT use the "Bicep/list_avm_metadata" MCP tool! Only include direct resource references in the Terraform solution template (root module) if no related AVM resource modules are available. If there is no Azure Verified Module available, then use `azapi` provider resources, never use the `azurerm` provider directly. Always use module interfaces for diagnostic settings, role assignments, resource locks, tags, managed identities, private endpoints, customer manged keys, etc., always use the related "interface" built-in to each resource module when available. Do not create and reference local modules, or any other Terraform files. If a subset of the deployments fail, don't delete anything, just attempt redeploying the whole solution after fixing any bugs. Follow IaC best practices: define everything in a single root module using the standard module files of `main.tf`, `variables.tf`, `outputs.tf`, `terraform.tf`, and `terraform.tfvars`. Only use explicit dependencies with the `depends_on` meta-argument when it's not possible to otherwise determine the order of deployment.
+
+The Azure subscription ID will always be supplied via az cli, it must not be exposed as a variable.
+
+Terraform solution template (root module) must validate without warnings or errors using the latest stable Terraform CLI version. Generate a warning when the latest version of an AVM module is not used. Before validating the solution template (root module) or attempting the first deployment, always fix all warnings or errors related to the AVM module versioning by updating to the latest available version of each module.
+
+Always use snake case for Terraform HCL resource names, module names, variable names, output names, map keys, etc. Never shorten names, always use the full name. E.g. `network_security_group` instead of `nsg`, etc.
+
+Ephemeral resources and write-only attributes should be used for passwords.
+
+---
+
+/speckit.plan You are creating an Azure AI Hub which is not necessary. We need a Microsoft Foundry instance. There is no AVM module for Microsoft Foundry at this time. Update the plan to use the `azapi` to create the Foundry resource while maintaining all requirements.
+
+TODO: /speckit.plan Reconsider using the Azure AI Foundry Pattern module. It does support private deployments.
+
+## Specification Update
+
+TODO: /speckit.specify Update the specification to use Microsoft Foundry and not "Azure AI Foundry project" or "hub," which created confusion in the plan phase because it would create an Machine Learning Workspace / AI studio.
